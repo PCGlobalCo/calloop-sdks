@@ -1,6 +1,6 @@
 {
   "name": "@calloop/agent-sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Agent client for Calloop: ring, answer, hang up and transfer calls over Calloop's agent gateway (Socket.IO + WebRTC).",
   "keywords": [
     "calloop",
@@ -30,7 +30,8 @@
     }
   },
   "files": [
-    "src"
+    "src",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "demo": "node examples/serve.mjs"

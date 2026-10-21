@@ -1,6 +1,6 @@
 {
   "name": "@calloop/agent-react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React bindings for @calloop/agent-sdk: a provider and hooks for agent and supervisor screens.",
   "keywords": [
     "calloop",
@@ -29,7 +29,8 @@
     }
   },
   "files": [
-    "src"
+    "src",
+    "CHANGELOG.md"
   ],
   "peerDependencies": {
     "@calloop/agent-sdk": "^0.2.0",

@@ -2,6 +2,10 @@
 # sdk/). A tag releases one package, with no stored tokens: npm and pub.dev
 # trust this repo through GitHub's OIDC (trusted publishing).
 #
+# npm versions are staged, not published: an owner approves each one with
+# 2FA (npmjs.com, or `npm stage list` / `npm stage approve <id>`), so access
+# to this workflow alone can't put a version in front of users.
+#
 #   agent-sdk-v<version>      → @calloop/agent-sdk     (agent-js)
 #   agent-react-v<version>    → @calloop/agent-react   (agent-react)
 #   calloop_agent-v<version>  → calloop_agent          (agent-dart)
@@ -28,6 +32,9 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
+      # `npm stage` is newer than the npm bundled with Node 24.
+      - run: npm install -g npm@12.2.0
+
       - name: Package and version
         run: |
           case "$GITHUB_REF_NAME" in
@@ -41,9 +48,9 @@ jobs:
           actual=$(node -p 'require("./package.json").version')
           [ "$actual" = "$VERSION" ] || { echo "::error::Tag says $VERSION, package.json says $actual"; exit 1; }
 
-      - name: Publish
+      - name: Stage
         working-directory: ${{ env.PKG_DIR }}
-        run: npm publish --provenance --access public
+        run: npm stage publish --provenance --access public
 
   pub:
     if: startsWith(github.ref_name, 'calloop_agent-v')
