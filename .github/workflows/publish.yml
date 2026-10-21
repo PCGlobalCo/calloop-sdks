@@ -62,7 +62,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: 3.44.0   # the version the SDK is developed and tested with; raise it on purpose
 
       - name: Tag matches pubspec.yaml
         run: |

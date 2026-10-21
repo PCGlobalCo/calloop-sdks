@@ -30,8 +30,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: 3.44.0   # the version the SDK is developed and tested with; raise it on purpose
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
+      # A newer Flutter may rewrite files (e.g. analysis_options.yaml); show what.
+      - run: git diff --stat
       - run: flutter pub publish --dry-run
