@@ -1,6 +1,6 @@
 # @calloop/agent-sdk
 
-The agent side of Calloop's [agent protocol](https://docs.calloop.net/agents/protocol) for
+The agent side of Calloop's [agent protocol](https://docs.calloop.net/docs/agents/protocol) for
 browsers and Node: connect, go available, ring, answer, hang up, transfer,
 and keep calls alive across network drops, page reloads and device switches.
 The app keeps its own UI, ringtones and routing; the SDK gives it events,
@@ -227,5 +227,5 @@ Types ship with the package: `connect`, `CalloopAgent`,
 
 ## A first test call
 
-Sign a test token with your signing key ([the agent token](https://docs.calloop.net/agents/protocol#the-agent-token)),
+Sign a test token with your signing key ([the agent token](https://docs.calloop.net/docs/agents/protocol#the-agent-token)),
 connect as in [Connecting](#connecting), go available, and call your line.

@@ -1,6 +1,6 @@
 # @calloop/agent-react
 
-React bindings for [`@calloop/agent-sdk`](https://docs.calloop.net/sdks/js): a provider
+React bindings for [`@calloop/agent-sdk`](https://docs.calloop.net/docs/sdks/js): a provider
 that connects once, and hooks that re-render when calls, availability, queues
 or the supervisor board change. The SDK's objects and actions are used as they
 are — this package only wires them into React. React 18+.
@@ -55,7 +55,7 @@ function OnCall({ call }) {
 
 ## Security
 
-The rules of the [JS SDK](https://docs.calloop.net/sdks/js#security) apply: only
+The rules of the [JS SDK](https://docs.calloop.net/docs/sdks/js#security) apply: only
 short-lived agent tokens from your backend in the browser (never an API key),
 `getToken` for a fresh one on every connect, `role` on every token, https only.
 

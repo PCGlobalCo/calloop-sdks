@@ -1,6 +1,6 @@
 {
   "name": "@calloop/agent-react",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "React bindings for @calloop/agent-sdk: a provider and hooks for agent and supervisor screens.",
   "keywords": [
     "calloop",
@@ -10,7 +10,7 @@
     "webrtc",
     "voip"
   ],
-  "homepage": "https://docs.calloop.net/sdks/react",
+  "homepage": "https://docs.calloop.net/docs/sdks/react",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PCGlobalCo/calloop-sdks.git",

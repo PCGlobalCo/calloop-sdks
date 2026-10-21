@@ -1,3 +1,8 @@
+## 0.1.1
+
+* Docs links fixed: they point to docs.calloop.net/docs/… (the old ones gave 404).
+* First release published by GitHub Actions from [PCGlobalCo/calloop-sdks](https://github.com/PCGlobalCo/calloop-sdks).
+
 ## 0.1.0
 
 * First public release.

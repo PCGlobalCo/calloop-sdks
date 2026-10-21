@@ -1,6 +1,6 @@
 {
   "name": "@calloop/agent-sdk",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Agent client for Calloop: ring, answer, hang up and transfer calls over Calloop's agent gateway (Socket.IO + WebRTC).",
   "keywords": [
     "calloop",
@@ -11,7 +11,7 @@
     "sip",
     "agent"
   ],
-  "homepage": "https://docs.calloop.net/sdks/js",
+  "homepage": "https://docs.calloop.net/docs/sdks/js",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PCGlobalCo/calloop-sdks.git",

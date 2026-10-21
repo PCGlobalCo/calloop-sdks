@@ -1,7 +1,7 @@
 name: calloop_agent
 description: "Calloop agent SDK for Flutter: take calls routed by Calloop (WhatsApp, SIP) over WebRTC — availability, devices, transfer, supervisor board and monitoring, native call UI."
-version: 0.1.0
-homepage: https://docs.calloop.net/sdks/dart
+version: 0.1.1
+homepage: https://docs.calloop.net/docs/sdks/dart
 repository: https://github.com/PCGlobalCo/calloop-sdks/tree/main/agent-dart
 issue_tracker: https://github.com/PCGlobalCo/calloop-sdks/issues
 topics:

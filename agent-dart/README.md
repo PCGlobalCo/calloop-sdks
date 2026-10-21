@@ -1,10 +1,10 @@
 # calloop_agent
 
-The agent side of Calloop's [agent protocol](https://docs.calloop.net/agents/protocol) for
+The agent side of Calloop's [agent protocol](https://docs.calloop.net/docs/agents/protocol) for
 Flutter: connect, go available, ring, answer, hang up, transfer, keep calls
 alive across network drops, app restarts and device switches, and — for
 supervisors — the tenant's live calls and monitoring (listen / whisper /
-barge). Same model and behaviour as the JS SDK ([`@calloop/agent-sdk`](https://docs.calloop.net/sdks/js)).
+barge). Same model and behaviour as the JS SDK ([`@calloop/agent-sdk`](https://docs.calloop.net/docs/sdks/js)).
 
 The app keeps its own screens and ringtones; the SDK gives it state
 (`ChangeNotifier`, works with Provider), events (streams) and the audio.
