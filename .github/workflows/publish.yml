@@ -1,0 +1,78 @@
+# Runs in the public repo PCGlobalCo/calloop-sdks (mirrored from calloop's
+# sdk/). A tag releases one package, with no stored tokens: npm and pub.dev
+# trust this repo through GitHub's OIDC (trusted publishing).
+#
+#   agent-sdk-v<version>      → @calloop/agent-sdk     (agent-js)
+#   agent-react-v<version>    → @calloop/agent-react   (agent-react)
+#   calloop_agent-v<version>  → calloop_agent          (agent-dart)
+#
+# The tag's version must equal the package's own version.
+name: Publish
+
+on:
+  push:
+    tags: ['agent-sdk-v*', 'agent-react-v*', 'calloop_agent-v*']
+
+jobs:
+  npm:
+    if: startsWith(github.ref_name, 'agent-sdk-v') || startsWith(github.ref_name, 'agent-react-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Package and version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            agent-sdk-v*)   echo "PKG_DIR=agent-js"    >> "$GITHUB_ENV"; echo "VERSION=${GITHUB_REF_NAME#agent-sdk-v}"   >> "$GITHUB_ENV" ;;
+            agent-react-v*) echo "PKG_DIR=agent-react" >> "$GITHUB_ENV"; echo "VERSION=${GITHUB_REF_NAME#agent-react-v}" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Tag matches package.json
+        working-directory: ${{ env.PKG_DIR }}
+        run: |
+          actual=$(node -p 'require("./package.json").version')
+          [ "$actual" = "$VERSION" ] || { echo "::error::Tag says $VERSION, package.json says $actual"; exit 1; }
+
+      - name: Publish
+        working-directory: ${{ env.PKG_DIR }}
+        run: npm publish --provenance --access public
+
+  pub:
+    if: startsWith(github.ref_name, 'calloop_agent-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: agent-dart
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sets up the pub.dev OIDC credentials; Flutter's pub uses them.
+      - uses: dart-lang/setup-dart@v1
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Tag matches pubspec.yaml
+        run: |
+          actual=$(grep -E '^version:' pubspec.yaml | awk '{print $2}')
+          expected="${GITHUB_REF_NAME#calloop_agent-v}"
+          [ "$actual" = "$expected" ] || { echo "::error::Tag says $expected, pubspec.yaml says $actual"; exit 1; }
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+      - name: Publish
+        run: flutter pub publish --force

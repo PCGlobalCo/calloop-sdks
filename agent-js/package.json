@@ -1,0 +1,45 @@
+{
+  "name": "@calloop/agent-sdk",
+  "version": "0.2.0",
+  "description": "Agent client for Calloop: ring, answer, hang up and transfer calls over Calloop's agent gateway (Socket.IO + WebRTC).",
+  "keywords": [
+    "calloop",
+    "call-center",
+    "webrtc",
+    "voip",
+    "whatsapp",
+    "sip",
+    "agent"
+  ],
+  "homepage": "https://docs.calloop.net/sdks/js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PCGlobalCo/calloop-sdks.git",
+    "directory": "agent-js"
+  },
+  "bugs": {
+    "url": "https://github.com/PCGlobalCo/calloop-sdks/issues"
+  },
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "demo": "node examples/serve.mjs"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

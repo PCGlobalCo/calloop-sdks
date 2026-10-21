@@ -1,0 +1,616 @@
+// An agent's connection to Calloop's agent gateway (docs/agent-protocol.md):
+// the socket, the agent's identity and ICE servers (session:ready),
+// availability, queues, this agent's calls — kept right across reconnects by
+// resyncing from calls:list on every (re)connect. Supervisors also get the
+// tenant's live calls (board) and monitoring.
+//
+// It's a ChangeNotifier (status, availability, calls, queues, team, board) for
+// Provider & co., plus streams for one-off events (incoming, callEnded, …).
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+
+import 'call.dart';
+import 'media.dart';
+import 'models.dart';
+import 'monitor.dart';
+import 'transport.dart';
+
+const int _protocol = 1;
+const _terminal = {'TERMINATED', 'FAILED', 'CANCELLED'};
+// Call errors after which the call can't go on here.
+const _endingErrors = {'ACCEPT_FAILED', 'CALL_ALREADY_ENDED', 'AGENT_MEDIA_NOT_READY', 'CALL_INITIATION_FAILED', 'PROVIDER_TRIGGER_FAILED'};
+// ICE/TURN credentials are refreshed at this share of their lifetime, never sooner than _minRefresh.
+const double _refreshAt = 0.8;
+const Duration _minRefresh = Duration(minutes: 1);
+
+typedef TokenProvider = FutureOr<String> Function();
+
+class CallEnded {
+  CallEnded(this.call, this.end);
+  final CalloopCall call;
+  final CallEnd end;
+}
+
+class CallStateChange {
+  CallStateChange(this.call, this.state, this.previous);
+  final CalloopCall call;
+  final CallState state;
+  final CallState previous;
+}
+
+class BoardCallEnded {
+  BoardCallEnded(this.call, this.terminationReason, this.terminatedBy);
+  final CallData call;
+  final String? terminationReason;
+  final String? terminatedBy;
+}
+
+class CalloopAgent extends ChangeNotifier {
+  /// [deviceId]: a stable id for this installation (keep it in secure storage).
+  /// [url]: the gateway, https:// or wss:// — a release build refuses anything
+  /// else (ArgumentError) except localhost, 127.0.0.1, ::1 and 10.0.2.2.
+  /// [token] or [getToken]: the agent JWT — getToken is called on every
+  /// (re)connect, since agent tokens are short-lived.
+  /// [purpose]: 'session' (the default) for the agent's main connection;
+  /// anything else is an auxiliary connection (e.g. one that only declines a
+  /// call): no presence, no redelivered calls, and no calls:sync on connect.
+  CalloopAgent({
+    required this.url,
+    required this.deviceId,
+    String? token,
+    TokenProvider? getToken,
+    CalloopMedia? media,
+    CalloopTransport? transport,
+    this.purpose = 'session',
+  })  : assert(token != null || getToken != null, 'token or getToken is required'),
+        media = media ?? const FlutterWebrtcMedia(),
+        _transport = transport ?? SocketIoTransport(url),
+        _getToken = getToken ?? (() => token!) {
+    checkGatewayUrl(url);   // https/wss only in release builds (whatever the transport)
+    _listen();
+    _transport.connect(() async => {'token': await _getToken(), 'device_id': deviceId, 'protocol': _protocol, 'purpose': purpose});
+  }
+
+  /// Connects and completes once Calloop has identified the agent (session:ready).
+  static Future<CalloopAgent> connect({
+    required String url,
+    required String deviceId,
+    String? token,
+    TokenProvider? getToken,
+    CalloopMedia? media,
+    CalloopTransport? transport,
+    String purpose = 'session',
+  }) async {
+    final agent = CalloopAgent(url: url, deviceId: deviceId, token: token, getToken: getToken, media: media, transport: transport, purpose: purpose);
+    try {
+      await agent.ready;
+    } catch (_) {
+      // Without this the socket keeps retrying in the background and may come
+      // up later as a session nobody uses (offered calls, presence).
+      agent.close();
+      rethrow;
+    }
+    return agent;
+  }
+
+  final String url;
+  final String deviceId;
+  final String purpose;
+  final CalloopMedia media;
+  final CalloopTransport _transport;
+  final TokenProvider _getToken;
+
+  final _ready = Completer<CalloopAgent>();
+  ConnectionStatus _status = ConnectionStatus.connecting;
+  CalloopSession? _session;
+  Availability? _availability;
+  String? _closedReason;
+  bool _refreshing = false;
+  Timer? _refreshTimer;
+
+  final Map<String, CalloopCall> _calls = {};
+  final Map<String, QueueSnapshot> _queues = {};
+  final Map<String, TeamMember> _team = {};
+  final Map<String, CallData> _board = {};
+  final Map<String, CalloopMonitor> _monitors = {};
+  final Set<String> _resolved = {};
+
+  final _incoming = StreamController<CalloopCall>.broadcast();
+  final _elsewhere = StreamController<CalloopCall>.broadcast();
+  final _callEnded = StreamController<CallEnded>.broadcast();
+  final _callStates = StreamController<CallStateChange>.broadcast();
+  final _errors = StreamController<Object>.broadcast();
+  final _boardEnded = StreamController<BoardCallEnded>.broadcast();
+  final _counters = StreamController<Map<String, dynamic>>.broadcast();
+  // Board requests waiting for their reply event (one at a time per kind).
+  final Map<String, Completer<Map<String, dynamic>>> _boardReplies = {};
+
+  // ── State ─────────────────────────────────────────────────────────────────
+
+  Future<CalloopAgent> get ready => _ready.future;
+  ConnectionStatus get status => _status;
+
+  /// Set when Calloop ended the connection for good (status closed without
+  /// [close]: e.g. the token's signing key was revoked). It won't reconnect:
+  /// close() this agent and connect again.
+  String? get closedReason => _closedReason;
+  CalloopSession? get session => _session;
+  CalloopIdentity? get me => _session?.agent;
+  bool get isSupervisor => me?.isSupervisor ?? false;
+  Availability? get availability => _availability;
+  List<Map<String, dynamic>> get iceServers => _session?.iceServers ?? const [];
+
+  /// This agent's calls.
+  List<CalloopCall> get calls => List.unmodifiable(_calls.values);
+  CalloopCall? call(Object callId) => _calls[idOf(callId)];
+  List<CalloopCall> get ringingCalls => [for (final c in _calls.values) if (c.state == CallState.ringing) c];
+
+  /// The call being set up, on, or dialing — or null.
+  CalloopCall? get activeCall {
+    for (final c in _calls.values) {
+      if (c.state == CallState.connecting || c.state == CallState.active || c.state == CallState.dialing) return c;
+    }
+    return null;
+  }
+
+  List<QueueSnapshot> get queues => List.unmodifiable(_queues.values);
+
+  /// Availability of the tenant's agents, as it changes.
+  List<TeamMember> get team => List.unmodifiable(_team.values);
+
+  /// Supervisors: the tenant's live calls.
+  List<CallData> get board => List.unmodifiable(_board.values);
+  CalloopMonitor? monitorOf(Object callId) => _monitors[idOf(callId)];
+
+  // ── Events ────────────────────────────────────────────────────────────────
+
+  /// A call offered to this agent — ring.
+  Stream<CalloopCall> get onIncoming => _incoming.stream;
+
+  /// This agent's call, active on another of their devices.
+  Stream<CalloopCall> get onElsewhere => _elsewhere.stream;
+  Stream<CallEnded> get onCallEnded => _callEnded.stream;
+  Stream<CallStateChange> get onCallState => _callStates.stream;
+
+  /// CalloopError (call:error) or a connection error.
+  Stream<Object> get onError => _errors.stream;
+  Stream<BoardCallEnded> get onBoardCallEnded => _boardEnded.stream;
+
+  /// Supervisors: the tenant's live counts ({ calls: { live, inIvr, waiting,
+  /// ringing, inProgress }, agents: { total, available, onCall, offline } }),
+  /// pushed at most every 2 s while the board changes.
+  Stream<Map<String, dynamic>> get onCounters => _counters.stream;
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+
+  /// Go AVAILABLE or OFFLINE (ON_CALL is Calloop's). Supervisors may set another agent's.
+  void setAvailability(Availability value, {Object? agentId}) {
+    if (value == Availability.onCall) throw ArgumentError('ON_CALL is set by Calloop');
+    send('agent:availability:set', {'availability': availabilityWire(value), if (agentId != null) 'agentId': agentId});
+  }
+
+  /// Re-read this agent's calls (supervisors: the tenant's) and the queue snapshots.
+  void sync() => send('calls:sync');
+
+  /// Start an outbound call the consumer created (POST /v1/tenants/{t}/calls).
+  Future<CalloopCall> startOutbound(Object callId, {rtc.MediaStream? stream}) async {
+    final call = CalloopCall.internal(this, {'callId': callId, 'direction': 'OUTBOUND'}, CallState.dialing);
+    _calls[idOf(callId)] = call;
+    notifyListeners();
+    await call.start(stream: stream);
+    return call;
+  }
+
+  /// Supervisors: listen to a call, then setMode(whisper | barge).
+  Future<CalloopMonitor> monitor(Object callId, {rtc.MediaStream? stream}) async {
+    if (!isSupervisor) throw StateError('Only supervisors can monitor calls');
+    final id = idOf(callId);
+    final existing = _monitors[id];
+    if (existing != null && existing.state != MonitorState.ended) return existing;
+    final m = CalloopMonitor.internal(this, id);
+    _monitors[id] = m;
+    notifyListeners();
+    try {
+      await m.start(stream: stream);
+    } catch (_) {
+      m.end('failed');
+      rethrow;
+    }
+    return m;
+  }
+
+  // ── The board (docs/agent-protocol.md → Board) ────────────────────────────
+
+  /// Narrow this connection's board to some lines, queues or agents (any of
+  /// them); no ids = the whole tenant. Completes with the filter applied.
+  Future<Map<String, dynamic>?> subscribeBoard({List<Object>? channelIds, List<Object>? queueIds, List<Object>? agentIds}) async {
+    final reply = await _boardRequest('board:subscribe', 'board:subscribed', {
+      if (channelIds != null) 'channelIds': channelIds,
+      if (queueIds != null) 'queueIds': queueIds,
+      if (agentIds != null) 'agentIds': agentIds,
+    });
+    return reply['filter'] is Map ? Map<String, dynamic>.from(reply['filter'] as Map) : null;
+  }
+
+  /// Stop receiving the board on this connection.
+  Future<void> unsubscribeBoard() => _boardRequest('board:unsubscribe', 'board:unsubscribed', const {});
+
+  /// A page of the live calls, newest first: (calls, nextCursor — null on the last page).
+  Future<({List<CallData> calls, Object? nextCursor})> boardCalls(
+      {List<Object>? channelIds, List<Object>? queueIds, List<Object>? agentIds, Object? cursor, int? limit}) async {
+    final reply = await _boardRequest('board:calls', 'board:calls', {
+      if (channelIds != null) 'channelIds': channelIds,
+      if (queueIds != null) 'queueIds': queueIds,
+      if (agentIds != null) 'agentIds': agentIds,
+      if (cursor != null) 'cursor': cursor,
+      if (limit != null) 'limit': limit,
+    });
+    final calls = [for (final c in (reply['calls'] as List? ?? const [])) CallData(Map<String, dynamic>.from(c as Map))];
+    return (calls: calls, nextCursor: reply['nextCursor']);
+  }
+
+  /// Supervisors: the tenant's counters now (also pushed: [onCounters]).
+  Future<Map<String, dynamic>> boardCounters() => _boardRequest('board:counters', 'board:counters', const {});
+
+  Future<Map<String, dynamic>> _boardRequest(String event, String replyEvent, Map<String, dynamic> payload) {
+    _boardReplies.remove(replyEvent)?.completeError(StateError('Superseded by a newer $event'));
+    final completer = Completer<Map<String, dynamic>>();
+    _boardReplies[replyEvent] = completer;
+    send(event, payload);
+    return completer.future.timeout(const Duration(seconds: 10), onTimeout: () {
+      if (identical(_boardReplies[replyEvent], completer)) _boardReplies.remove(replyEvent);
+      throw TimeoutException('$event timed out');
+    });
+  }
+
+  /// Supervisors: move any call to an agent or into a queue.
+  void transferCall(Object callId, {Object? agentId, Object? queueId}) {
+    if ((agentId == null) == (queueId == null)) throw ArgumentError('transfer needs agentId or queueId');
+    send('call:transfer', {'callId': callId, if (agentId != null) 'agentId': agentId, if (queueId != null) 'queueId': queueId});
+  }
+
+  /// New ICE/TURN credentials now (also done automatically before they expire).
+  void refreshSession() {
+    _refreshing = true;
+    send('session:refresh');
+  }
+
+  /// Disconnect; calls' media is closed.
+  void close() {
+    _refreshTimer?.cancel();
+    for (final c in _calls.values) {
+      c.closeMedia();
+    }
+    for (final m in List.of(_monitors.values)) {
+      m.end('closed');
+    }
+    _transport.close();
+    _status = ConnectionStatus.closed;
+    notifyListeners();
+  }
+
+  // ── Internals (Call / Monitor) ────────────────────────────────────────────
+
+  void send(String event, [Object? payload]) => _transport.emit(event, payload);
+
+  void callStateChanged(CalloopCall call, CallState state, CallState previous) {
+    _callStates.add(CallStateChange(call, state, previous));
+    notifyListeners();
+  }
+
+  void forget(CalloopCall call, CallEnd end) {
+    _calls.remove(call.id);
+    _resolved.add(call.id);
+    _callEnded.add(CallEnded(call, end));
+    notifyListeners();
+  }
+
+  void forgetMonitor(CalloopMonitor m) {
+    if (identical(_monitors[m.callId], m)) _monitors.remove(m.callId);
+    notifyListeners();
+  }
+
+  void _scheduleRefresh() {
+    _refreshTimer?.cancel();
+    final expiresAt = _session?.iceServersExpireAt;
+    if (expiresAt == null) return;   // static credentials: nothing to refresh
+    final left = expiresAt.difference(DateTime.now());
+    var delay = Duration(milliseconds: (left.inMilliseconds * _refreshAt).round());
+    if (delay < _minRefresh) delay = _minRefresh;
+    _refreshTimer = Timer(delay, refreshSession);
+  }
+
+  bool _isMine(CallData d) {
+    final mine = me?.id;
+    if (mine == null) return false;
+    if (d.agentId != null) return d.agentId == mine;
+    return d.offeredAgentIds.contains(mine);
+  }
+
+  void _offer(Map<String, dynamic> payload) {
+    final id = idOf(payload['callId']);
+    if (_resolved.contains(id)) return;
+    final existing = _calls[id];
+    if (existing != null) {
+      existing.update(payload);   // e.g. the SDP arriving after a resync saw the call
+      return;
+    }
+    final call = CalloopCall.internal(this, payload, CallState.ringing);
+    _calls[id] = call;
+    notifyListeners();
+    _incoming.add(call);
+  }
+
+  // calls:list is the truth after any (re)connect.
+  void _reconcile(List<Map<String, dynamic>> ongoing) {
+    if (isSupervisor) {
+      _board.clear();
+      for (final entry in ongoing) {
+        if (_terminal.contains(entry['status'])) continue;
+        _board[idOf(entry['callId'])] = CallData(Map.of(entry)..remove('sdpOffer'));
+      }
+    }
+    final seen = <String>{};
+    for (final entry in ongoing) {
+      final d = CallData(entry);
+      if (!_isMine(d)) continue;
+      final id = d.callId;
+      seen.add(id);
+      final local = _calls[id];
+      if (local != null) {
+        local.update(entry);
+        continue;
+      }
+      if (_resolved.contains(id) || _terminal.contains(d.status)) continue;
+      final onOtherDevice = d.deviceId != null && d.deviceId != deviceId;
+      if (d.status == 'RINGING' && d.direction == CallDirection.inbound && d.deviceId == null && d.sdpOffer != null) {
+        _offer(entry);
+      } else if (onOtherDevice) {
+        final call = CalloopCall.internal(this, entry, CallState.elsewhere);
+        _calls[id] = call;
+        _elsewhere.add(call);
+      } else if (d.deviceId == deviceId) {
+        // Ours, on this device, but its media is gone (app restart): reconnect.
+        final call = CalloopCall.internal(this, entry, CallState.connecting);
+        _calls[id] = call;
+        call.reconnect('page_reload').catchError((Object err) => call.end('media_failed', {'error': err.toString()}));
+      }
+    }
+    // Calls we held that Calloop no longer lists are over.
+    for (final call in List.of(_calls.values)) {
+      if (!seen.contains(call.id) && call.state != CallState.dialing) call.end('gone');
+    }
+    notifyListeners();
+  }
+
+  void _boardUpsert(Map<String, dynamic> payload) {
+    if (!isSupervisor || payload['callId'] == null) return;
+    final id = idOf(payload['callId']);
+    final patch = Map.of(payload)
+      ..remove('sdpOffer')
+      ..remove('sdpAnswer');
+    (_board[id] ??= CallData({'callId': payload['callId']})).merge(patch);
+    notifyListeners();
+  }
+
+  void _boardEnd(Map<String, dynamic> p) {
+    final id = idOf(p['callId']);
+    _monitors[id]?.end('call_ended');
+    final view = _board.remove(id);
+    if (view == null) return;
+    _boardEnded.add(BoardCallEnded(view, (p['terminationReason'] ?? p['reason']) as String?, p['terminatedBy'] as String?));
+    notifyListeners();
+  }
+
+  void _listen() {
+    final t = _transport;
+    Map<String, dynamic> m(dynamic p) => p is Map ? Map<String, dynamic>.from(p) : <String, dynamic>{};
+    CalloopCall? forCall(Map<String, dynamic> p) => _calls[idOf(p['callId'])];
+    CalloopMonitor? forMonitor(Map<String, dynamic> p) => _monitors[idOf(p['callId'])];
+    bool onBoard(Map<String, dynamic> p) => _board.containsKey(idOf(p['callId']));
+
+    t.on('session:ready', (raw) {
+      _session = CalloopSession(m(raw));
+      _scheduleRefresh();
+      if (_refreshing) {
+        // A credentials refresh on the same connection: nothing else changed.
+        _refreshing = false;
+        notifyListeners();
+        return;
+      }
+      // A (re)connect: monitoring doesn't survive the old socket.
+      for (final mon in List.of(_monitors.values)) {
+        mon.end('disconnected');
+      }
+      _status = ConnectionStatus.ready;
+      if (!_ready.isCompleted) _ready.complete(this);
+      notifyListeners();
+      // An auxiliary connection takes no part in calls: nothing to resync.
+      if (purpose == 'session') sync();
+    });
+    t.on('connect_error', (err) {
+      if (_session == null && !_ready.isCompleted) _ready.completeError(err ?? 'connect_error');
+      _errors.add(err ?? 'connect_error');
+    });
+    t.on('disconnect', (reason) {
+      _refreshing = false;
+      if (_status == ConnectionStatus.closed) return;
+      if (reason == 'io server disconnect') {
+        // Calloop ended the connection (e.g. the token's signing key was
+        // revoked): socket.io doesn't retry that by itself.
+        _refreshTimer?.cancel();
+        for (final mon in List.of(_monitors.values)) {
+          mon.end('disconnected');
+        }
+        _closedReason = '$reason';
+        _status = ConnectionStatus.closed;
+        if (!_ready.isCompleted) _ready.completeError(StateError('Calloop closed the connection'));
+      } else {
+        _status = ConnectionStatus.reconnecting;
+      }
+      notifyListeners();
+    });
+
+    t.on('calls:list', (raw) {
+      final ongoing = [for (final e in (m(raw)['ongoing'] as List? ?? const [])) m(e)];
+      _reconcile(ongoing);
+    });
+    t.on('call:incoming', (raw) {
+      final p = m(raw);
+      if (_isMine(CallData(p))) _offer(p);
+    });
+    t.on('call:offer_withdrawn', (raw) {
+      final p = m(raw);
+      final call = forCall(p);
+      if (call?.state == CallState.ringing) call!.end('withdrawn', {'withdrawnReason': p['reason']});
+    });
+    t.on('call:handled', (raw) {
+      final p = m(raw);
+      // An accept answers the call: it's in progress (SIP sends no provider status for it).
+      if (p['action'] == 'accepted' && onBoard(p)) _boardUpsert({'callId': p['callId'], 'agentId': p['userId'], 'agentName': p['agentName'], 'status': 'IN_PROGRESS'});
+      final call = forCall(p);
+      if (call == null || call.state != CallState.ringing || p['action'] != 'accepted') return;
+      final byMeHere = idOf(p['userId']) == me?.id && p['deviceId'] == deviceId;
+      if (!byMeHere) call.end('answered_elsewhere', {'by': p['userId'], 'agentName': p['agentName']});
+    });
+    t.on('call:terminated', (raw) {
+      final p = m(raw);
+      forCall(p)?.end('terminated', {'terminationReason': p['terminationReason'] ?? p['reason'], 'terminatedBy': p['terminatedBy'], 'failure': p['failure']});
+      // 'transferred' ends the previous agent's leg, not the call.
+      if (p['reason'] != 'transferred') _boardEnd(p);
+    });
+    t.on('call:status', (raw) {
+      final p = m(raw);
+      // The board speaks Calloop's statuses: a provider's ACCEPTED is IN_PROGRESS.
+      if (onBoard(p)) {
+        _boardUpsert({'callId': p['callId'], 'status': p['status'] == 'ACCEPTED' ? 'IN_PROGRESS' : p['status'], 'ringingAt': p['ringingAt'], 'answeredAt': p['answeredAt']});
+      }
+      final call = forCall(p);
+      if (call == null) return;
+      call.update({'status': p['status'], 'ringingAt': p['ringingAt'], 'answeredAt': p['answeredAt']});
+      if (call.direction == CallDirection.outbound && (p['status'] == 'ACCEPTED' || p['status'] == 'IN_PROGRESS')) call.customerAnswered();
+    });
+
+    t.on('call:started', (raw) {
+      final p = m(raw);
+      forCall(p)?.onStarted(p);
+    });
+    t.on('call:reconnected', (raw) {
+      final p = m(raw);
+      forCall(p)?.onReconnected(p);
+    });
+    t.on('call:connection_superseded', (raw) => forCall(m(raw))?.superseded());
+    t.on('connection:ice-candidate:server', (raw) {
+      final p = m(raw);
+      final type = p['connectionType'];
+      if (type == 'MONITOR') {
+        forMonitor(p)?.onServerCandidate(p['candidate']);
+        return;
+      }
+      if (type != null && type != 'AGENT') return;
+      forCall(p)?.onServerCandidate(p['candidate']);
+    });
+
+    t.on('call:customer:media:state', (raw) {
+      final p = m(raw);
+      forCall(p)?.signal(CustomerMediaSignal('${p['state']}'));
+    });
+    t.on('call:network:terminating', (raw) => forCall(m(raw))?.signal(const NetworkTerminatingSignal()));
+    t.on('call:dtmf', (raw) {
+      final p = m(raw);
+      forCall(p)?.signal(DtmfSignal('${p['digit']}'));
+    });
+    t.on('call:supervisor:mode', (raw) {
+      final p = m(raw);
+      forCall(p)?.signal(SupervisorModeSignal(monitorModeFrom(p['mode'])));
+      forMonitor(p)?.onMode(monitorModeFrom(p['mode']));
+    });
+    t.on('call:agent:private:changed', (raw) {
+      final p = m(raw);
+      forCall(p)?.signal(PrivateChangedSignal(p['active'] == true));
+    });
+
+    // Supervisors: the board and monitoring.
+    t.on('call:incoming:supervisor', (raw) => _boardUpsert(m(raw)));
+    t.on('call:initiated', (raw) => _boardUpsert(m(raw)));
+    t.on('call:transferred', (raw) {
+      final p = m(raw);
+      _boardUpsert({'callId': p['callId'], 'agentId': p['agentId'] ?? p['userId'], 'agentName': p['agentName'], 'queueId': p['targetQueueId'] ?? p['queueId']});
+    });
+    t.on('call:ivr_state', (raw) {
+      final p = m(raw);
+      _boardUpsert({'callId': p['callId'], 'ivr': {'nodeType': p['nodeType'], 'nodeId': p['nodeId']}});
+    });
+    for (final done in ['call:ivr_transferred', 'call:ivr_terminated', 'call:ivr_session_closed']) {
+      t.on(done, (raw) {
+        final p = m(raw);
+        if (onBoard(p)) _boardUpsert({'callId': p['callId'], 'ivr': null});
+      });
+    }
+    t.on('call:monitor:started', (raw) {
+      final p = m(raw);
+      forMonitor(p)?.onStarted(p);
+    });
+    t.on('call:monitor:offer', (raw) {
+      final p = m(raw);
+      forMonitor(p)?.onOffer(p);
+    });
+    t.on('call:monitor:mode:changed', (raw) {
+      final p = m(raw);
+      forMonitor(p)?.onMode(monitorModeFrom(p['mode']));
+    });
+    t.on('call:monitor:ended', (raw) => forMonitor(m(raw))?.end('ended'));
+
+    t.on('call:agent_availability', (raw) {
+      final p = m(raw);
+      final member = TeamMember(agentId: idOf(p['userId']), availability: availabilityFrom(p['availability']),
+          reason: p['reason'] as String?, updatedAt: p['updatedAt']?.toString());
+      _team[member.agentId] = member;
+      if (member.agentId == me?.id) _availability = member.availability;
+      notifyListeners();
+    });
+    t.on('call:agent_queue', (raw) {
+      final snapshot = QueueSnapshot(m(raw));
+      _queues[snapshot.queueId] = snapshot;
+      notifyListeners();
+    });
+    // Board replies (no acknowledgements on this transport: Calloop answers
+    // with the event of the same name). Counters are also pushed.
+    for (final event in const ['board:subscribed', 'board:unsubscribed', 'board:calls']) {
+      t.on(event, (raw) => _boardReplies.remove(event)?.complete(m(raw)));
+    }
+    t.on('board:counters', (raw) {
+      final p = m(raw);
+      _boardReplies.remove('board:counters')?.complete(p);
+      _counters.add(p);
+    });
+    t.on('call:error', (raw) {
+      final p = m(raw);
+      final error = CalloopError(callId: p['callId'] == null ? null : idOf(p['callId']), code: '${p['code']}', message: '${p['message']}');
+      _errors.add(error);
+      if (error.code == 'BOARD_REQUEST_FAILED') {
+        for (final c in _boardReplies.values) {
+          c.completeError(error);
+        }
+        _boardReplies.clear();
+      }
+      if (error.code == 'MONITOR_FAILED' || error.code == 'MONITOR_MODE_NOT_ALLOWED') forMonitor(p)?.onError(error);
+      if (error.callId != null && _endingErrors.contains(error.code)) forCall(p)?.end('error', {'code': error.code, 'message': error.message});
+    });
+  }
+
+  @override
+  void dispose() {
+    close();
+    _incoming.close();
+    _elsewhere.close();
+    _callEnded.close();
+    _callStates.close();
+    _errors.close();
+    _boardEnded.close();
+    _counters.close();
+    super.dispose();
+  }
+}
