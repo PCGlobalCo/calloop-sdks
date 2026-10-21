@@ -41,6 +41,11 @@ jobs:
             agent-sdk-v*)   echo "PKG_DIR=agent-js"    >> "$GITHUB_ENV"; echo "VERSION=${GITHUB_REF_NAME#agent-sdk-v}"   >> "$GITHUB_ENV" ;;
             agent-react-v*) echo "PKG_DIR=agent-react" >> "$GITHUB_ENV"; echo "VERSION=${GITHUB_REF_NAME#agent-react-v}" >> "$GITHUB_ENV" ;;
           esac
+          # A pre-release (0.3.0-beta.1) goes to the `next` dist-tag, so `npm install` keeps getting the stable one.
+          case "$GITHUB_REF_NAME" in
+            *-*) echo "DIST_TAG=next"   >> "$GITHUB_ENV" ;;
+            *)   echo "DIST_TAG=latest" >> "$GITHUB_ENV" ;;
+          esac
 
       - name: Tag matches package.json
         working-directory: ${{ env.PKG_DIR }}
@@ -50,7 +55,7 @@ jobs:
 
       - name: Stage
         working-directory: ${{ env.PKG_DIR }}
-        run: npm stage publish --provenance --access public
+        run: npm stage publish --provenance --access public --tag "$DIST_TAG"
 
   pub:
     if: startsWith(github.ref_name, 'calloop_agent-v')
