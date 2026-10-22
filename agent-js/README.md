@@ -69,6 +69,14 @@ the agent is deleted, or its tenant or consumer is suspended.
   consumer is suspended (`closed`, below). Reconnect with a fresh token, or not
   at all.
 
+## Test mode
+
+Nothing changes in the SDK. In development, have your backend sign agent tokens
+with your **test** signing key (its `kid` starts with `test_`; the claims stay the
+same, `iss` included): the agent then belongs to your test tenant, takes free
+simulated test calls, and calls out only to test numbers. Same `url`. See
+[Testing your integration](https://docs.calloop.net/docs/guide/testing).
+
 ## The agent
 
 | | |

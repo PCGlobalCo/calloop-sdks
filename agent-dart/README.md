@@ -195,6 +195,14 @@ CallKit) comes next.
   name comes in the data fields (`customer_name`, `customer_address`) for the
   app's own UI.
 
+## Test mode
+
+Nothing changes in the package. In development, have your backend sign agent
+tokens with your **test** signing key (its `kid` starts with `test_`; the claims
+stay the same): the agent belongs to your test tenant and takes free simulated
+test calls, through the same native call screen. Same `url`. See
+[Testing your integration](https://docs.calloop.net/docs/guide/testing).
+
 ## What it handles
 
 - Resync on every connect: ringing calls ring, calls on this device reconnect

@@ -59,6 +59,10 @@ The rules of the [JS SDK](https://docs.calloop.net/docs/sdks/js#security) apply:
 short-lived agent tokens from your backend in the browser (never an API key),
 `getToken` for a fresh one on every connect, `role` on every token, https only.
 
+In development, sign the tokens with your **test** signing key (`kid` `test_…`): same
+`url`, same component, free simulated test calls
+([Testing your integration](https://docs.calloop.net/docs/guide/testing)).
+
 ## Provider
 
 `<CalloopProvider>` takes `connect()`'s options (`url`, `token` | `getToken`,
